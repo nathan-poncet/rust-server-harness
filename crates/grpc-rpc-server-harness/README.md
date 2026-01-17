@@ -1,42 +1,6 @@
 # grpc-rpc-server-harness
 
-A Rust library for creating **mock gRPC servers** in your integration tests. Instead of mocking your gRPC client or stubs, spin up a real gRPC server that responds exactly as you configure it.
-
-## 🎯 Why Use This?
-
-When testing code that calls gRPC services, you need to verify that:
-- Your code sends the **correct requests** (right service, method, protobuf message)
-- Your code **handles responses correctly** (deserialization, error codes, edge cases)
-
-**Traditional approaches have drawbacks:**
-
-| Approach | Problem |
-|----------|---------|
-| Mock the generated stubs | Doesn't test actual protobuf serialization or HTTP/2 layer |
-| Use a shared test server | Flaky tests, shared state, requires infrastructure |
-| Mock at the transport layer | Complex setup, easy to miss protocol details |
-
-**Server Harness gives you:**
-- ✅ **Real gRPC calls** - Your code makes actual HTTP/2 requests with protobuf
-- ✅ **Isolated per test** - Each test gets its own server with its own responses
-- ✅ **No .proto files needed** - Define services/methods dynamically at runtime
-- ✅ **Request inspection** - Assert on the exact requests your code made
-
-## 📦 Use Cases
-
-- **Testing gRPC clients** - Verify your client code sends correct protobuf messages
-- **Integration testing** - Test your app's behavior with specific gRPC responses
-- **Error scenario testing** - Simulate gRPC error codes (UNAVAILABLE, INTERNAL, etc.)
-- **Microservice testing** - Mock dependent services in your test environment
-- **Load testing setup** - Create predictable mock backends for load tests
-
-## ✨ Features
-
-- 🔄 **Auto-shutdown** - Server automatically shuts down when all handlers have been called
-- ⚡ **Static & Dynamic Handlers** - Predefined responses or compute responses based on the request
-- 📝 **Request Collection** - Capture all incoming requests (service, method, message bytes)
-- 🔁 **Sequential Handlers** - Return different responses for successive calls
-- 🌐 **Tonic-compatible** - Works with any gRPC client over standard HTTP/2
+Mock gRPC servers for integration tests. Spin up a real gRPC server with predefined responses that automatically shuts down when all expected requests are handled.
 
 ## Installation
 
@@ -50,58 +14,236 @@ tokio = { version = "1", features = ["full"] }
 
 ```rust
 use grpc_rpc_server_harness::prelude::*;
-use std::net::SocketAddr;
 
-#[tokio::main]
-async fn main() -> Result<(), HarnessError> {
-    let addr: SocketAddr = "127.0.0.1:50051".parse().unwrap();
+let collected = ScenarioBuilder::new()
+    .server(Tonic::bind("127.0.0.1:50051".parse().unwrap()))
+    .collector(DefaultCollector::new())
+    .service(
+        Service::new("my.package.UserService")
+            .with_method(
+                Method::new("GetUser")
+                    .with_handler(Handler::from_bytes(vec![/* protobuf bytes */]))
+            )
+    )
+    .build()
+    .execute()
+    .await?;
 
-    // Spawn a task to make gRPC requests
-    let requests_task = tokio::spawn(async move {
-        // Your gRPC client code here
-    });
+assert_eq!(collected[0].service, "my.package.UserService");
+assert_eq!(collected[0].method, "GetUser");
+```
 
-    // Build and execute the scenario
+## Real-World Scenarios
+
+### Polling Service Testing
+
+Test a component that periodically calls a gRPC service for status updates:
+
+```rust
+#[tokio::test]
+async fn test_status_polling() {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    // Component polls StatusService.GetStatus every second
+    let component = spawn_my_grpc_poller(addr);
+
     let collected = ScenarioBuilder::new()
         .server(Tonic::bind(addr))
         .collector(DefaultCollector::new())
         .service(
-            Service::new("my.package.UserService")
+            Service::new("monitoring.StatusService")
                 .with_method(
-                    Method::new("GetUser")
-                        .with_handler(Handler::from_bytes(vec![/* protobuf bytes */]))
+                    Method::new("GetStatus")
+                        // Returns "initializing" twice, then "ready"
+                        .with_handler(Handler::from_prost(&StatusResponse { state: "initializing".into() }))
+                        .with_handler(Handler::from_prost(&StatusResponse { state: "initializing".into() }))
+                        .with_handler(Handler::from_prost(&StatusResponse { state: "ready".into() }))
                 )
         )
         .build()
         .execute()
-        .await?;
+        .await
+        .unwrap();
 
-    requests_task.await.unwrap();
-
-    // Assert on collected requests
-    assert_eq!(collected.len(), 1);
-    assert_eq!(collected[0].service, "my.package.UserService");
-    assert_eq!(collected[0].method, "GetUser");
-
-    Ok(())
+    // Verify 3 polling calls
+    assert_eq!(collected.len(), 3);
+    assert!(component.is_ready());
 }
 ```
 
-## Dynamic Handlers
+### Retry Logic Testing
 
-Create handlers that respond dynamically based on the request:
+Validate gRPC retry mechanism with transient failures:
 
 ```rust
-let method = Method::new("Echo")
-    .with_handler(Handler::dynamic(|ctx| {
-        // Echo back the request with a prefix
-        let mut response = vec![0xFF];
-        response.extend_from_slice(&ctx.message.data);
-        Message::new(response)
-    }));
+#[tokio::test]
+async fn test_grpc_retry() {
+    let addr: SocketAddr = "127.0.0.1:50052".parse().unwrap();
+
+    let collected = ScenarioBuilder::new()
+        .server(Tonic::bind(addr))
+        .collector(DefaultCollector::new())
+        .service(
+            Service::new("data.DataService")
+                .with_method(
+                    Method::new("FetchData")
+                        // First 2 calls return error
+                        .with_handler(Handler::from_error(tonic::Code::Unavailable, "service down"))
+                        .with_handler(Handler::from_error(tonic::Code::Unavailable, "still down"))
+                        // Third call succeeds
+                        .with_handler(Handler::from_prost(&DataResponse { value: 42 }))
+                )
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    // Client should have retried 3 times
+    assert_eq!(collected.len(), 3);
+}
 ```
 
-## With Prost Messages
+### Microservice Dependency Mocking
+
+Test a service that calls multiple downstream gRPC services:
+
+```rust
+#[tokio::test]
+async fn test_order_service_aggregation() {
+    let addr: SocketAddr = "127.0.0.1:50053".parse().unwrap();
+
+    let collected = ScenarioBuilder::new()
+        .server(Tonic::bind(addr))
+        .collector(DefaultCollector::new())
+        .service(
+            Service::new("users.UserService")
+                .with_method(
+                    Method::new("GetUser")
+                        .with_handler(Handler::from_prost(&User { id: 1, name: "Alice".into() }))
+                )
+        )
+        .service(
+            Service::new("inventory.InventoryService")
+                .with_method(
+                    Method::new("CheckStock")
+                        .with_handler(Handler::from_prost(&StockResponse { available: true }))
+                )
+        )
+        .service(
+            Service::new("pricing.PricingService")
+                .with_method(
+                    Method::new("GetPrice")
+                        .with_handler(Handler::from_prost(&PriceResponse { amount: 99_99 }))
+                )
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    // Order service should call all 3 downstream services
+    assert_eq!(collected.len(), 3);
+}
+```
+
+### Streaming Simulation
+
+Test bidirectional streaming with sequential responses:
+
+```rust
+#[tokio::test]
+async fn test_streaming_updates() {
+    let addr: SocketAddr = "127.0.0.1:50054".parse().unwrap();
+
+    let collected = ScenarioBuilder::new()
+        .server(Tonic::bind(addr))
+        .collector(DefaultCollector::new())
+        .service(
+            Service::new("updates.UpdateService")
+                .with_method(
+                    Method::new("Subscribe")
+                        .with_handler(Handler::from_prost(&Update { version: 1 }))
+                        .with_handler(Handler::from_prost(&Update { version: 2 }))
+                        .with_handler(Handler::from_prost(&Update { version: 3 }))
+                )
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    assert_eq!(collected.len(), 3);
+}
+```
+
+### Authentication Flow Testing
+
+Test token refresh with gRPC metadata:
+
+```rust
+#[tokio::test]
+async fn test_auth_token_refresh() {
+    let addr: SocketAddr = "127.0.0.1:50055".parse().unwrap();
+
+    let collected = ScenarioBuilder::new()
+        .server(Tonic::bind(addr))
+        .collector(DefaultCollector::new())
+        .service(
+            Service::new("auth.AuthService")
+                .with_method(
+                    Method::new("RefreshToken")
+                        .with_handler(Handler::from_prost(&TokenResponse {
+                            token: "new_token".into(),
+                            expires_in: 3600
+                        }))
+                )
+        )
+        .service(
+            Service::new("api.ApiService")
+                .with_method(
+                    Method::new("SecureCall")
+                        .with_handler(Handler::from_prost(&ApiResponse { data: "secret".into() }))
+                )
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    // Verify token refresh happened before API call
+    assert_eq!(collected[0].method, "RefreshToken");
+    assert_eq!(collected[1].method, "SecureCall");
+}
+```
+
+## Common Patterns
+
+### Sequential Responses
+
+Each call gets the next handler:
+
+```rust
+Method::new("GetStatus")
+    .with_handler(Handler::from_prost(&Status { code: 1 }))  // 1st call
+    .with_handler(Handler::from_prost(&Status { code: 2 }))  // 2nd call
+    .with_handler(Handler::from_prost(&Status { code: 3 })) // 3rd call
+```
+
+### Dynamic Responses
+
+Build responses based on request content:
+
+```rust
+Method::new("Echo")
+    .with_handler(Handler::dynamic(|ctx| {
+        let mut response = vec![0xFF]; // prefix
+        response.extend_from_slice(&ctx.message.data);
+        Message::new(response)
+    }))
+```
+
+### With Prost Messages
 
 Serialize protobuf messages directly:
 
@@ -114,57 +256,52 @@ struct GetUserResponse {
     name: String,
 }
 
-let handler = Handler::from_prost(&GetUserResponse {
-    name: "Alice".to_string(),
-});
+Handler::from_prost(&GetUserResponse { name: "Alice".into() })
 ```
 
-## Multiple Services
+### Error Simulation
 
 ```rust
-let scenario = ScenarioBuilder::new()
+Handler::from_error(tonic::Code::NotFound, "user not found")
+Handler::from_error(tonic::Code::Unavailable, "service down")
+Handler::from_error(tonic::Code::Internal, "internal error")
+Handler::from_error(tonic::Code::PermissionDenied, "unauthorized")
+```
+
+### Multiple Services
+
+```rust
+ScenarioBuilder::new()
     .server(Tonic::bind(addr))
     .collector(DefaultCollector::new())
     .service(
-        Service::new("my.package.UserService")
-            .with_method(Method::new("GetUser").with_handler(Handler::from_bytes(vec![])))
-            .with_method(Method::new("CreateUser").with_handler(Handler::from_bytes(vec![])))
+        Service::new("users.UserService")
+            .with_method(Method::new("GetUser").with_handler(...))
+            .with_method(Method::new("CreateUser").with_handler(...))
     )
     .service(
-        Service::new("my.package.OrderService")
-            .with_method(Method::new("GetOrder").with_handler(Handler::from_bytes(vec![])))
+        Service::new("orders.OrderService")
+            .with_method(Method::new("GetOrder").with_handler(...))
     )
-    .build();
+    .build()
 ```
 
-## 🔧 How It Works
+### Request Assertions
 
-```
-┌─────────────────┐                    ┌──────────────────┐
-│   Your Code     │  gRPC Request      │   Mock Server    │
-│  (gRPC Client)  │───────────────────▶│   (Tonic-based)  │
-│                 │  HTTP/2 + Protobuf │                  │
-│                 │◀───────────────────│  Returns bytes   │
-│                 │  Protobuf Response │  you configured  │
-└─────────────────┘                    └──────────────────┘
-                                              │
-                                              ▼
-                                       Auto-shutdown when
-                                       all handlers consumed
-                                              │
-                                              ▼
-                                       ┌──────────────────┐
-                                       │ Collected Requests│
-                                       │ (service, method, │
-                                       │  message bytes)   │
-                                       └──────────────────┘
-```
+```rust
+let collected = scenario.execute().await?;
 
-1. **Define services** - Specify service name, methods, and protobuf responses
-2. **Execute scenario** - Server starts and listens for gRPC calls
-3. **Your code runs** - Makes real gRPC calls to the mock server
-4. **Auto-shutdown** - Server stops when all expected handlers have responded
-5. **Assert** - Verify collected requests match expectations
+// Count
+assert_eq!(collected.len(), 2);
+
+// Service & method
+assert_eq!(collected[0].service, "users.UserService");
+assert_eq!(collected[0].method, "GetUser");
+
+// Decode request message
+let request: GetUserRequest = prost::Message::decode(&collected[0].message.data[..])?;
+assert_eq!(request.user_id, 123);
+```
 
 ## License
 

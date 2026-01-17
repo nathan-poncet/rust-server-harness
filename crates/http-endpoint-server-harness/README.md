@@ -1,42 +1,6 @@
 # http-endpoint-server-harness
 
-A Rust library for creating **mock HTTP servers** in your integration tests. Instead of mocking your HTTP client, spin up a real server that responds exactly as you configure it.
-
-## 🎯 Why Use This?
-
-When testing code that calls external HTTP APIs, you need to verify that:
-- Your code sends the **correct requests** (right path, method, headers, body)
-- Your code **handles responses correctly** (parsing, error handling, edge cases)
-
-**Traditional approaches have drawbacks:**
-
-| Approach | Problem |
-|----------|---------|
-| Mock the HTTP client | Doesn't test actual serialization, headers, or network code |
-| Use a shared test server | Flaky tests, shared state issues, hard to customize per test |
-| Record/replay (VCR) | Brittle when APIs change, hard to test error scenarios |
-
-**Server Harness gives you:**
-- ✅ **Real HTTP requests** - Your code makes actual network calls
-- ✅ **Isolated per test** - Each test gets its own server with its own responses
-- ✅ **Full control** - Define exactly what each endpoint returns
-- ✅ **Request inspection** - Assert on the exact requests your code made
-
-## 📦 Use Cases
-
-- **Testing REST API clients** - Verify your client library sends correct requests
-- **Integration testing** - Test your app's behavior with specific API responses
-- **Error scenario testing** - Simulate 500 errors, timeouts, malformed JSON
-- **Contract testing** - Ensure your code handles the expected API format
-- **Webhook testing** - Verify your code sends webhooks correctly
-
-## ✨ Features
-
-- 🔄 **Auto-shutdown** - Server automatically shuts down when all handlers have been called
-- ⚡ **Static & Dynamic Handlers** - Predefined responses or compute responses based on the request
-- 📝 **Request Collection** - Capture all incoming requests for assertions
-- 🔁 **Sequential Handlers** - Return different responses for successive calls
-- 🌐 **Axum Backend** - Built on the battle-tested Axum web framework
+Mock HTTP servers for integration tests. Spin up a real server with predefined responses that automatically shuts down when all expected requests are handled.
 
 ## Installation
 
@@ -44,124 +8,264 @@ When testing code that calls external HTTP APIs, you need to verify that:
 [dev-dependencies]
 http-endpoint-server-harness = "0.1"
 tokio = { version = "1", features = ["full"] }
-reqwest = "0.12"
 ```
 
 ## Quick Start
 
 ```rust
 use http_endpoint_server_harness::prelude::*;
-use std::net::SocketAddr;
-use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<(), HarnessError> {
-    let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+let collected = ScenarioBuilder::new()
+    .server(Axum::bind("127.0.0.1:3000".parse().unwrap()))
+    .collector(DefaultCollector::new())
+    .endpoint(
+        Endpoint::new("/api/users", Method::Get)
+            .with_handler(Handler::from_json(&json!({"users": []})))
+    )
+    .build()
+    .execute()
+    .await?;
 
-    // Spawn a task to make HTTP requests
-    let requests_task = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let client = reqwest::Client::new();
-        client.get(format!("http://{}/api/users", addr))
-            .send()
-            .await
-            .unwrap();
-    });
+assert_eq!(collected.len(), 1);
+assert_eq!(collected[0].path, "/api/users");
+```
 
-    // Build and execute the scenario
+## Real-World Scenarios
+
+### Polling Service Testing
+
+Test a component that periodically calls a server (e.g., health checks every second):
+
+```rust
+#[tokio::test]
+async fn test_polling_component() {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    // Component polls /status every second until "ready"
+    let component = spawn_my_polling_component(addr);
+
     let collected = ScenarioBuilder::new()
         .server(Axum::bind(addr))
         .collector(DefaultCollector::new())
         .endpoint(
-            Endpoint::new("/api/users", Method::Get)
-                .with_handler(Handler::from_json(&serde_json::json!({
-                    "users": [{"id": 1, "name": "Alice"}]
-                })))
+            Endpoint::new("/status", Method::Get)
+                .with_handler(Handler::from_json(&json!({"state": "starting"})))
+                .with_handler(Handler::from_json(&json!({"state": "starting"})))
+                .with_handler(Handler::from_json(&json!({"state": "ready"})))
         )
         .build()
         .execute()
-        .await?;
+        .await
+        .unwrap();
 
-    requests_task.await.unwrap();
+    // Verify component polled exactly 3 times
+    assert_eq!(collected.len(), 3);
 
-    // Assert on collected requests
-    assert_eq!(collected.len(), 1);
-    assert_eq!(collected[0].path, "/api/users");
-
-    Ok(())
+    // Verify component stopped after receiving "ready"
+    assert!(component.is_finished());
 }
 ```
 
-## Dynamic Handlers
+### Retry Logic Testing
 
-Create handlers that respond dynamically based on the request:
-
-```rust
-let endpoint = Endpoint::new("/api/echo", Method::Post)
-    .with_handler(Handler::dynamic(|ctx| {
-        Response::ok()
-            .with_json_body(&serde_json::json!({
-                "echoed": ctx.body_as_str().unwrap_or(""),
-                "method": format!("{:?}", ctx.method),
-                "path": ctx.path
-            }))
-            .unwrap()
-    }));
-```
-
-## Sequential Handlers
-
-Define multiple handlers for the same endpoint - each subsequent request uses the next handler:
+Validate your retry mechanism handles transient failures:
 
 ```rust
-let endpoint = Endpoint::new("/api/counter", Method::Get)
-    .with_handler(Handler::from_json(&json!({"count": 1})))
-    .with_handler(Handler::from_json(&json!({"count": 2})))
-    .with_handler(Handler::from_json(&json!({"count": 3})));
+#[tokio::test]
+async fn test_retry_on_failure() {
+    let addr: SocketAddr = "127.0.0.1:3001".parse().unwrap();
+
+    let collected = ScenarioBuilder::new()
+        .server(Axum::bind(addr))
+        .collector(DefaultCollector::new())
+        .endpoint(
+            Endpoint::new("/api/data", Method::Get)
+                // Fail twice, then succeed
+                .with_handler(Handler::new(Response::internal_error()))
+                .with_handler(Handler::new(Response::new(503)))
+                .with_handler(Handler::from_json(&json!({"data": "success"})))
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    // Client should have retried 3 times
+    assert_eq!(collected.len(), 3);
+}
 ```
 
-## Custom Responses
+### Webhook Delivery Verification
+
+Ensure your system sends webhooks with correct payloads:
 
 ```rust
-// Custom status code
-let handler = Handler::new(Response::new(201).with_body("Created"));
+#[tokio::test]
+async fn test_webhook_payload() {
+    let addr: SocketAddr = "127.0.0.1:3002".parse().unwrap();
 
-// Custom headers
-let handler = Handler::new(
-    Response::ok()
-        .with_header("X-Custom-Header", "value")
-        .with_json_body(&json!({"success": true}))
-        .unwrap()
-);
+    // Trigger the action that sends a webhook
+    trigger_payment_completion(addr);
+
+    let collected = ScenarioBuilder::new()
+        .server(Axum::bind(addr))
+        .collector(DefaultCollector::new())
+        .endpoint(
+            Endpoint::new("/webhook", Method::Post)
+                .with_handler(Handler::from_json(&json!({"ok": true})))
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    // Verify webhook content
+    let webhook = &collected[0];
+    let body: serde_json::Value = serde_json::from_slice(&webhook.body).unwrap();
+
+    assert_eq!(webhook.headers.get("Content-Type"), Some(&"application/json".into()));
+    assert_eq!(body["event"], "payment.completed");
+    assert!(body["signature"].is_string());
+}
 ```
 
-## 🔧 How It Works
+### API Gateway / BFF Testing
 
-```
-┌─────────────────┐                    ┌──────────────────┐
-│   Your Code     │   GET /api/users   │   Mock Server    │
-│  (HTTP Client)  │───────────────────▶│   (Axum-based)   │
-│                 │                    │                  │
-│                 │◀───────────────────│  Returns JSON    │
-│                 │   200 OK + JSON    │  you configured  │
-└─────────────────┘                    └──────────────────┘
-                                              │
-                                              ▼
-                                       Auto-shutdown when
-                                       all handlers consumed
-                                              │
-                                              ▼
-                                       ┌──────────────────┐
-                                       │ Collected Requests│
-                                       │ for assertions   │
-                                       └──────────────────┘
+Test a service that aggregates multiple downstream APIs:
+
+```rust
+#[tokio::test]
+async fn test_bff_aggregation() {
+    let addr: SocketAddr = "127.0.0.1:3003".parse().unwrap();
+
+    let collected = ScenarioBuilder::new()
+        .server(Axum::bind(addr))
+        .collector(DefaultCollector::new())
+        .endpoint(
+            Endpoint::new("/users/1", Method::Get)
+                .with_handler(Handler::from_json(&json!({"id": 1, "name": "Alice"})))
+        )
+        .endpoint(
+            Endpoint::new("/users/1/orders", Method::Get)
+                .with_handler(Handler::from_json(&json!([{"id": 100}])))
+        )
+        .endpoint(
+            Endpoint::new("/users/1/preferences", Method::Get)
+                .with_handler(Handler::from_json(&json!({"theme": "dark"})))
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    // BFF should call all 3 endpoints
+    assert_eq!(collected.len(), 3);
+}
 ```
 
-1. **Define endpoints** - Specify path, method, and response for each endpoint
-2. **Execute scenario** - Server starts and waits for requests
-3. **Your code runs** - Makes real HTTP calls to the mock server
-4. **Auto-shutdown** - Server stops when all expected handlers have responded
-5. **Assert** - Verify collected requests match expectations
+### Rate Limiting Client Testing
+
+Verify your client handles 429 responses:
+
+```rust
+#[tokio::test]
+async fn test_rate_limit_handling() {
+    let addr: SocketAddr = "127.0.0.1:3004".parse().unwrap();
+
+    let collected = ScenarioBuilder::new()
+        .server(Axum::bind(addr))
+        .collector(DefaultCollector::new())
+        .endpoint(
+            Endpoint::new("/api/resource", Method::Get)
+                .with_handler(Handler::new(
+                    Response::new(429)
+                        .with_header("Retry-After", "1")
+                        .with_json(&json!({"error": "rate limited"}))
+                ))
+                .with_handler(Handler::from_json(&json!({"data": "ok"})))
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    assert_eq!(collected.len(), 2);
+}
+```
+
+## Common Patterns
+
+### Sequential Responses
+
+Each call gets the next handler:
+
+```rust
+Endpoint::new("/api/counter", Method::Get)
+    .with_handler(Handler::from_json(&json!({"n": 1})))  // 1st
+    .with_handler(Handler::from_json(&json!({"n": 2})))  // 2nd
+    .with_handler(Handler::from_json(&json!({"n": 3}))) // 3rd
+```
+
+### Dynamic Responses
+
+Build responses based on request content:
+
+```rust
+Endpoint::new("/api/greet", Method::Post)
+    .with_handler(Handler::dynamic(|req| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body)
+            .unwrap_or(json!({}));
+        let name = body["name"].as_str().unwrap_or("World");
+        Response::ok().with_json(&json!({"message": format!("Hello, {}!", name)}))
+    }))
+```
+
+### Error Simulation
+
+```rust
+Handler::new(Response::not_found())                    // 404
+Handler::new(Response::internal_error())               // 500
+Handler::new(Response::new(503))                       // 503
+Handler::new(Response::new(429)
+    .with_header("Retry-After", "60"))                 // 429 with header
+```
+
+### Path Parameters
+
+Match dynamic segments:
+
+```rust
+Endpoint::new("/users/{id}/posts/{post_id}", Method::Get)
+    .with_handler(Handler::from_json(&json!({"title": "Hello"})))
+```
+
+### Request Assertions
+
+```rust
+let collected = scenario.execute().await?;
+
+// Count
+assert_eq!(collected.len(), 2);
+
+// Method & path
+assert_eq!(collected[0].method, Method::Post);
+assert_eq!(collected[0].path, "/api/users");
+
+// Headers
+assert!(collected[0].headers.get("Authorization").unwrap().starts_with("Bearer "));
+
+// Body
+let body: CreateUserRequest = serde_json::from_slice(&collected[0].body)?;
+assert_eq!(body.email, "alice@example.com");
+```
+
+### Custom Headers
+
+```rust
+Handler::from_json(&json!({"data": "ok"}))
+    .with_header("X-Request-Id", "abc123")
+    .with_header("Cache-Control", "no-store")
+```
 
 ## License
 

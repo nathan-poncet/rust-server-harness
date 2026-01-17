@@ -1,42 +1,6 @@
 # graphql-operation-server-harness
 
-A Rust library for creating **mock GraphQL servers** in your integration tests. Instead of mocking your GraphQL client, spin up a real GraphQL server that responds exactly as you configure it.
-
-## 🎯 Why Use This?
-
-When testing code that calls GraphQL APIs, you need to verify that:
-- Your code sends the **correct queries/mutations** (right fields, variables, operation names)
-- Your code **handles responses correctly** (data parsing, error handling, partial responses)
-
-**Traditional approaches have drawbacks:**
-
-| Approach | Problem |
-|----------|---------|
-| Mock the GraphQL client | Doesn't test actual query building or response parsing |
-| Use a shared test server | Flaky tests, shared state, requires maintaining a schema |
-| Schema-based mocking | Complex setup, may not match production behavior |
-
-**Server Harness gives you:**
-- ✅ **Real GraphQL requests** - Your code makes actual HTTP requests with GraphQL
-- ✅ **Isolated per test** - Each test gets its own server with its own responses
-- ✅ **No schema required** - Define query/mutation responses dynamically
-- ✅ **Request inspection** - Assert on queries, variables, and operation names
-
-## 📦 Use Cases
-
-- **Testing GraphQL clients** - Verify your client sends correct queries and variables
-- **Integration testing** - Test your app's behavior with specific GraphQL responses
-- **Error scenario testing** - Simulate GraphQL errors (field errors, network errors)
-- **Partial response testing** - Test handling of `data` + `errors` combined responses
-- **BFF testing** - Mock downstream GraphQL services in Backend-for-Frontend tests
-
-## ✨ Features
-
-- 🔄 **Auto-shutdown** - Server automatically shuts down when all handlers have been called
-- ⚡ **Static & Dynamic Handlers** - Predefined responses or compute responses based on variables
-- 📝 **Request Collection** - Capture all incoming requests (query, variables, operation name)
-- 🔁 **Sequential Handlers** - Return different responses for successive calls to the same field
-- 🌐 **async-graphql Backend** - Built on the mature async-graphql library
+Mock GraphQL servers for integration tests. Spin up a real GraphQL server with predefined responses that automatically shuts down when all expected requests are handled.
 
 ## Installation
 
@@ -44,34 +8,79 @@ When testing code that calls GraphQL APIs, you need to verify that:
 [dev-dependencies]
 graphql-operation-server-harness = "0.1"
 tokio = { version = "1", features = ["full"] }
-reqwest = "0.12"
 ```
 
 ## Quick Start
 
 ```rust
 use graphql_operation_server_harness::prelude::*;
-use std::net::SocketAddr;
-use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<(), HarnessError> {
-    let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+let collected = ScenarioBuilder::new()
+    .server(AsyncGraphQL::bind("127.0.0.1:8080".parse().unwrap()))
+    .collector(DefaultCollector::new())
+    .operation(
+        Operation::query()
+            .with_field(
+                Field::new("users")
+                    .with_handler(Handler::new(json!([{"id": 1, "name": "Alice"}])))
+            )
+    )
+    .build()
+    .execute()
+    .await?;
 
-    // Spawn a task to make GraphQL requests
-    let requests_task = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let client = reqwest::Client::new();
-        client.post(format!("http://{}/", addr))
-            .json(&serde_json::json!({
-                "query": "{ users { id name } }"
-            }))
-            .send()
-            .await
-            .unwrap();
-    });
+assert_eq!(collected.len(), 1);
+assert!(collected[0].query.contains("users"));
+```
 
-    // Build and execute the scenario
+## Real-World Scenarios
+
+### Polling Service Testing
+
+Test a component that periodically queries a GraphQL endpoint for updates:
+
+```rust
+#[tokio::test]
+async fn test_graphql_polling() {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    // Component polls for sync status every second
+    let component = spawn_sync_poller(addr);
+
+    let collected = ScenarioBuilder::new()
+        .server(AsyncGraphQL::bind(addr))
+        .collector(DefaultCollector::new())
+        .operation(
+            Operation::query()
+                .with_field(
+                    Field::new("syncStatus")
+                        // First 2 calls: syncing
+                        .with_handler(Handler::new(json!({"status": "syncing", "progress": 50})))
+                        .with_handler(Handler::new(json!({"status": "syncing", "progress": 80})))
+                        // Third call: complete
+                        .with_handler(Handler::new(json!({"status": "complete", "progress": 100})))
+                )
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    // Component polled 3 times
+    assert_eq!(collected.len(), 3);
+    assert!(component.sync_complete());
+}
+```
+
+### Pagination Testing
+
+Test a component that fetches paginated data:
+
+```rust
+#[tokio::test]
+async fn test_pagination() {
+    let addr: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+
     let collected = ScenarioBuilder::new()
         .server(AsyncGraphQL::bind(addr))
         .collector(DefaultCollector::new())
@@ -79,122 +88,234 @@ async fn main() -> Result<(), HarnessError> {
             Operation::query()
                 .with_field(
                     Field::new("users")
-                        .with_handler(Handler::new(serde_json::json!([
-                            {"id": 1, "name": "Alice"}
-                        ])))
+                        // Page 1
+                        .with_handler(Handler::new(json!({
+                            "nodes": [{"id": 1}, {"id": 2}],
+                            "pageInfo": {"hasNextPage": true, "cursor": "abc"}
+                        })))
+                        // Page 2
+                        .with_handler(Handler::new(json!({
+                            "nodes": [{"id": 3}, {"id": 4}],
+                            "pageInfo": {"hasNextPage": true, "cursor": "def"}
+                        })))
+                        // Page 3 (last)
+                        .with_handler(Handler::new(json!({
+                            "nodes": [{"id": 5}],
+                            "pageInfo": {"hasNextPage": false, "cursor": null}
+                        })))
                 )
         )
         .build()
         .execute()
-        .await?;
+        .await
+        .unwrap();
 
-    requests_task.await.unwrap();
-
-    // Assert on collected requests
-    assert_eq!(collected.len(), 1);
-
-    Ok(())
+    // Verify cursor was passed correctly
+    assert_eq!(collected.len(), 3);
+    assert!(collected[1].variables.as_ref().unwrap()["after"] == "abc");
+    assert!(collected[2].variables.as_ref().unwrap()["after"] == "def");
 }
 ```
 
-## Dynamic Handlers
+### Error Handling Testing
 
-Create handlers that respond dynamically based on the request variables:
+Test how your client handles GraphQL errors:
 
 ```rust
-let field = Field::new("createUser")
+#[tokio::test]
+async fn test_partial_error_response() {
+    let addr: SocketAddr = "127.0.0.1:8082".parse().unwrap();
+
+    let collected = ScenarioBuilder::new()
+        .server(AsyncGraphQL::bind(addr))
+        .collector(DefaultCollector::new())
+        .operation(
+            Operation::query()
+                .with_field(
+                    Field::new("user")
+                        .with_handler(Handler::with_error("User not found"))
+                )
+                .with_field(
+                    Field::new("posts")
+                        .with_handler(Handler::new(json!([{"id": 1, "title": "Hello"}])))
+                )
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    // Response has both data and errors
+    // { "data": { "posts": [...] }, "errors": [{ "message": "User not found" }] }
+}
+```
+
+### Mutation Flow Testing
+
+Test a complete CRUD workflow:
+
+```rust
+#[tokio::test]
+async fn test_crud_workflow() {
+    let addr: SocketAddr = "127.0.0.1:8083".parse().unwrap();
+
+    let collected = ScenarioBuilder::new()
+        .server(AsyncGraphQL::bind(addr))
+        .collector(DefaultCollector::new())
+        // Create
+        .operation(
+            Operation::mutation()
+                .with_field(
+                    Field::new("createUser")
+                        .with_handler(Handler::dynamic(|ctx| {
+                            let name = ctx.get_variable("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown");
+                            HandlerResponse::new(json!({"id": 42, "name": name}))
+                        }))
+                )
+        )
+        // Update
+        .operation(
+            Operation::mutation()
+                .with_field(
+                    Field::new("updateUser")
+                        .with_handler(Handler::new(json!({"id": 42, "name": "Updated"})))
+                )
+        )
+        // Delete
+        .operation(
+            Operation::mutation()
+                .with_field(
+                    Field::new("deleteUser")
+                        .with_handler(Handler::new(json!(true)))
+                )
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    assert_eq!(collected.len(), 3);
+}
+```
+
+### BFF (Backend-for-Frontend) Testing
+
+Mock a downstream GraphQL service:
+
+```rust
+#[tokio::test]
+async fn test_bff_aggregation() {
+    let addr: SocketAddr = "127.0.0.1:8084".parse().unwrap();
+
+    // Your BFF service aggregates data from a downstream GraphQL API
+    let collected = ScenarioBuilder::new()
+        .server(AsyncGraphQL::bind(addr))
+        .collector(DefaultCollector::new())
+        .operation(
+            Operation::query()
+                .with_field(
+                    Field::new("user")
+                        .with_handler(Handler::new(json!({"id": 1, "name": "Alice"})))
+                )
+                .with_field(
+                    Field::new("userOrders")
+                        .with_handler(Handler::new(json!([{"id": 100, "total": 50}])))
+                )
+                .with_field(
+                    Field::new("userPreferences")
+                        .with_handler(Handler::new(json!({"theme": "dark"})))
+                )
+        )
+        .build()
+        .execute()
+        .await
+        .unwrap();
+
+    // BFF made one query that fetched all fields
+    assert_eq!(collected.len(), 1);
+}
+```
+
+## Common Patterns
+
+### Sequential Responses
+
+Each call gets the next handler:
+
+```rust
+Field::new("counter")
+    .with_handler(Handler::new(json!({"value": 1})))  // 1st call
+    .with_handler(Handler::new(json!({"value": 2})))  // 2nd call
+    .with_handler(Handler::new(json!({"value": 3}))) // 3rd call
+```
+
+### Dynamic Responses
+
+Build responses based on variables:
+
+```rust
+Field::new("user")
     .with_handler(Handler::dynamic(|ctx| {
-        let name = ctx.variables
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown");
-
-        serde_json::json!({
-            "id": 42,
-            "name": name
-        })
-    }));
+        let id = ctx.get_variable("id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        HandlerResponse::new(json!({"id": id, "name": format!("User {}", id)}))
+    }))
 ```
 
-## Mutations
+### Error Simulation
 
 ```rust
-let scenario = ScenarioBuilder::new()
-    .server(AsyncGraphQL::bind(addr))
-    .collector(DefaultCollector::new())
-    .operation(
-        Operation::mutation()
-            .with_field(
-                Field::new("createUser")
-                    .with_handler(Handler::new(json!({"id": 1, "name": "New User"})))
-            )
-            .with_field(
-                Field::new("deleteUser")
-                    .with_handler(Handler::new(json!(true)))
-            )
-    )
-    .build();
-```
-
-## Error Responses
-
-```rust
-// Field with error
-let handler = Handler::with_error("Something went wrong");
+// Simple error
+Handler::with_error("Something went wrong")
 
 // Error at specific path
-let handler = Handler::with_error_at_path(
-    "Validation failed",
-    vec!["user", "email"]
-);
+Handler::with_error_at_path("Invalid email", vec!["user", "email"])
 ```
 
-## Multiple Operations
+### Queries and Mutations
 
 ```rust
-let scenario = ScenarioBuilder::new()
-    .server(AsyncGraphQL::bind(addr))
-    .collector(DefaultCollector::new())
-    .operation(
-        Operation::query()
-            .with_field(Field::new("users").with_handler(Handler::new(json!([]))))
-            .with_field(Field::new("posts").with_handler(Handler::new(json!([]))))
-    )
-    .operation(
-        Operation::mutation()
-            .with_field(Field::new("createUser").with_handler(Handler::new(json!({}))))
-    )
-    .build();
+// Query
+Operation::query()
+    .with_field(Field::new("users").with_handler(...))
+
+// Mutation
+Operation::mutation()
+    .with_field(Field::new("createUser").with_handler(...))
 ```
 
-## 🔧 How It Works
+### Multiple Fields
 
-```
-┌─────────────────┐                    ┌──────────────────┐
-│   Your Code     │  POST /graphql     │   Mock Server    │
-│ (GraphQL Client)│───────────────────▶│ (async-graphql)  │
-│                 │  { query, vars }   │                  │
-│                 │◀───────────────────│  Returns JSON    │
-│                 │  { data, errors }  │  you configured  │
-└─────────────────┘                    └──────────────────┘
-                                              │
-                                              ▼
-                                       Auto-shutdown when
-                                       all handlers consumed
-                                              │
-                                              ▼
-                                       ┌──────────────────┐
-                                       │ Collected Requests│
-                                       │ (query, variables,│
-                                       │  operation name)  │
-                                       └──────────────────┘
+```rust
+Operation::query()
+    .with_field(Field::new("user").with_handler(Handler::new(json!({"id": 1}))))
+    .with_field(Field::new("posts").with_handler(Handler::new(json!([]))))
+    .with_field(Field::new("comments").with_handler(Handler::new(json!([]))))
 ```
 
-1. **Define operations** - Specify queries/mutations and their field responses
-2. **Execute scenario** - Server starts and listens for GraphQL requests
-3. **Your code runs** - Makes real GraphQL calls to the mock server
-4. **Auto-shutdown** - Server stops when all expected handlers have responded
-5. **Assert** - Verify collected requests match expectations
+### Request Assertions
+
+```rust
+let collected = scenario.execute().await?;
+
+// Count
+assert_eq!(collected.len(), 2);
+
+// Query content
+assert!(collected[0].query.contains("users"));
+assert!(collected[1].query.contains("createUser"));
+
+// Variables
+let vars = collected[0].variables.as_ref().unwrap();
+assert_eq!(vars["limit"], 10);
+assert_eq!(vars["offset"], 0);
+
+// Operation name
+assert_eq!(collected[0].operation_name, Some("GetUsers".into()));
+```
 
 ## License
 

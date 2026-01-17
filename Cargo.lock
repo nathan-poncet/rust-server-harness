@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-operation-server-harness"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "grpc-rpc-server-harness"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "http-body-util",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "http-endpoint-server-harness"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
