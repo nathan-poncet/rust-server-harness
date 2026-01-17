@@ -1,0 +1,34 @@
+[package]
+name = "graphql-operation-server-harness"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GraphQL operation server harness for testing mock operations"
+repository.workspace = true
+readme = "README.md"
+keywords = ["graphql", "testing", "mock", "server", "harness"]
+categories = ["development-tools::testing", "web-programming"]
+
+[features]
+default = ["async-graphql"]
+async-graphql = ["dep:async-graphql", "dep:axum", "dep:tokio"]
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Async GraphQL
+async-graphql = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+reqwest = { workspace = true, features = ["json"] }
+
+[[example]]
+name = "simple"
+required-features = ["async-graphql"]

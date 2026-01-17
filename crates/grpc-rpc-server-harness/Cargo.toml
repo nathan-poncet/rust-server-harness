@@ -1,0 +1,39 @@
+[package]
+name = "grpc-rpc-server-harness"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "gRPC RPC server harness for testing mock services"
+repository.workspace = true
+readme = "README.md"
+keywords = ["grpc", "testing", "mock", "server", "harness"]
+categories = ["development-tools::testing", "web-programming"]
+
+[features]
+default = ["tonic"]
+tonic = ["dep:tonic", "dep:prost", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:tower"]
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+# Tonic
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+hyper = { version = "1.0", optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+tower = { version = "0.5", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+hyper = { version = "1.0", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http2"] }
+http-body-util = "0.1"
+
+[[example]]
+name = "simple"
+required-features = ["tonic"]
