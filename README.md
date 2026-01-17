@@ -20,22 +20,6 @@ A collection of Rust libraries for creating mock servers for testing purposes. T
 - ⚡ **Static & Dynamic Handlers** - Support for predefined responses and dynamic responses based on request context
 - 🧱 **Clean Architecture** - Separation of concerns between entities, use cases, and adapters
 
-## Architecture
-
-Each library follows Clean Architecture with the following structure:
-
-```
-src/
-├── entities/          # Core domain objects (Scenario, Endpoint, Handler, etc.)
-├── use_cases/         # Application logic (ScenarioBuilder, ports)
-│   ├── ports/         # Interfaces (Server, Collector traits)
-│   └── create_scenario.rs
-├── adapters/          # Infrastructure implementations
-│   └── gateways/      # Server implementations (Axum, Tonic, async-graphql)
-├── error.rs           # Error types
-└── lib.rs             # Public API and prelude
-```
-
 ## Quick Start
 
 ### HTTP
@@ -96,4 +80,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-

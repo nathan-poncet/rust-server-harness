@@ -140,17 +140,6 @@ let scenario = ScenarioBuilder::new()
     .build();
 ```
 
-## Architecture
-
-```
-src/
-├── entities/           # Operation, Field, Handler, Scenario
-├── use_cases/          # ScenarioBuilder, ports (Server, Collector traits)
-├── adapters/gateways/  # async-graphql server implementation
-└── lib.rs              # Public API and prelude
-```
-
 ## License
 
 MIT - see [LICENSE](../../LICENSE) for details.
-

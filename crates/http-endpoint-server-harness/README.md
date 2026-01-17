@@ -108,17 +108,6 @@ let handler = Handler::new(
 );
 ```
 
-## Architecture
-
-```
-src/
-├── entities/           # Endpoint, Handler, Method, Request, Response, Scenario
-├── use_cases/          # ScenarioBuilder, ports (Server, Collector traits)
-├── adapters/gateways/  # Axum server implementation
-└── lib.rs              # Public API and prelude
-```
-
 ## License
 
 MIT - see [LICENSE](../../LICENSE) for details.
-
