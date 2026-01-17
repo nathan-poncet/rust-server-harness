@@ -32,7 +32,6 @@ When testing code that calls GraphQL APIs, you need to verify that:
 
 ## ✨ Features
 
-- 🏗️ **Builder Pattern** - Fluent API with `ScenarioBuilder` for defining test scenarios
 - 🔄 **Auto-shutdown** - Server automatically shuts down when all handlers have been called
 - ⚡ **Static & Dynamic Handlers** - Predefined responses or compute responses based on variables
 - 📝 **Request Collection** - Capture all incoming requests (query, variables, operation name)

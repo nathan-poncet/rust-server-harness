@@ -39,12 +39,11 @@ When testing code that makes HTTP, gRPC, or GraphQL calls to external services, 
 
 ## ✨ Features
 
-- 🏗️ **Builder Pattern** - Fluent API with `ScenarioBuilder` for defining test scenarios
 - 🔄 **Auto-shutdown** - Servers automatically shut down when all handlers have been called
 - 📝 **Request Collection** - Collect all incoming requests for assertions
 - ⚡ **Static & Dynamic Handlers** - Predefined responses or dynamic responses based on request content
 - 🔁 **Sequential Handlers** - Define different responses for successive calls to the same endpoint
-- 🧱 **Clean Architecture** - Extensible design with pluggable server backends and collectors
+- 🔌 **Extensible** - Pluggable server backends and collectors
 
 ## 🚀 Quick Start
 
