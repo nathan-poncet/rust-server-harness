@@ -1,15 +1,43 @@
 # grpc-rpc-server-harness
 
-A Rust library for creating mock gRPC servers for testing purposes. Built with **Clean Architecture** principles and a fluent **Builder Pattern** API.
+A Rust library for creating **mock gRPC servers** in your integration tests. Instead of mocking your gRPC client or stubs, spin up a real gRPC server that responds exactly as you configure it.
 
-## Features
+## 🎯 Why Use This?
+
+When testing code that calls gRPC services, you need to verify that:
+- Your code sends the **correct requests** (right service, method, protobuf message)
+- Your code **handles responses correctly** (deserialization, error codes, edge cases)
+
+**Traditional approaches have drawbacks:**
+
+| Approach | Problem |
+|----------|---------|
+| Mock the generated stubs | Doesn't test actual protobuf serialization or HTTP/2 layer |
+| Use a shared test server | Flaky tests, shared state, requires infrastructure |
+| Mock at the transport layer | Complex setup, easy to miss protocol details |
+
+**Server Harness gives you:**
+- ✅ **Real gRPC calls** - Your code makes actual HTTP/2 requests with protobuf
+- ✅ **Isolated per test** - Each test gets its own server with its own responses
+- ✅ **No .proto files needed** - Define services/methods dynamically at runtime
+- ✅ **Request inspection** - Assert on the exact requests your code made
+
+## 📦 Use Cases
+
+- **Testing gRPC clients** - Verify your client code sends correct protobuf messages
+- **Integration testing** - Test your app's behavior with specific gRPC responses
+- **Error scenario testing** - Simulate gRPC error codes (UNAVAILABLE, INTERNAL, etc.)
+- **Microservice testing** - Mock dependent services in your test environment
+- **Load testing setup** - Create predictable mock backends for load tests
+
+## ✨ Features
 
 - 🏗️ **Builder Pattern** - Fluent API with `ScenarioBuilder` for defining test scenarios
 - 🔄 **Auto-shutdown** - Server automatically shuts down when all handlers have been called
-- ⚡ **Static & Dynamic Handlers** - Support for predefined responses and dynamic responses based on request context
-- 📝 **Request Collection** - Collect all incoming requests for assertions
-- 🌐 **Tonic-compatible** - Works with standard gRPC clients over HTTP/2
-- 🧱 **Clean Architecture** - Proper separation of entities, use cases, and adapters
+- ⚡ **Static & Dynamic Handlers** - Predefined responses or compute responses based on the request
+- 📝 **Request Collection** - Capture all incoming requests (service, method, message bytes)
+- 🔁 **Sequential Handlers** - Return different responses for successive calls
+- 🌐 **Tonic-compatible** - Works with any gRPC client over standard HTTP/2
 
 ## Installation
 
@@ -109,6 +137,35 @@ let scenario = ScenarioBuilder::new()
     )
     .build();
 ```
+
+## 🔧 How It Works
+
+```
+┌─────────────────┐                    ┌──────────────────┐
+│   Your Code     │  gRPC Request      │   Mock Server    │
+│  (gRPC Client)  │───────────────────▶│   (Tonic-based)  │
+│                 │  HTTP/2 + Protobuf │                  │
+│                 │◀───────────────────│  Returns bytes   │
+│                 │  Protobuf Response │  you configured  │
+└─────────────────┘                    └──────────────────┘
+                                              │
+                                              ▼
+                                       Auto-shutdown when
+                                       all handlers consumed
+                                              │
+                                              ▼
+                                       ┌──────────────────┐
+                                       │ Collected Requests│
+                                       │ (service, method, │
+                                       │  message bytes)   │
+                                       └──────────────────┘
+```
+
+1. **Define services** - Specify service name, methods, and protobuf responses
+2. **Execute scenario** - Server starts and listens for gRPC calls
+3. **Your code runs** - Makes real gRPC calls to the mock server
+4. **Auto-shutdown** - Server stops when all expected handlers have responded
+5. **Assert** - Verify collected requests match expectations
 
 ## License
 

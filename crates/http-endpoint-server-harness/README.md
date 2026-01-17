@@ -1,15 +1,43 @@
 # http-endpoint-server-harness
 
-A Rust library for creating mock HTTP servers for testing purposes. Built with **Clean Architecture** principles and a fluent **Builder Pattern** API.
+A Rust library for creating **mock HTTP servers** in your integration tests. Instead of mocking your HTTP client, spin up a real server that responds exactly as you configure it.
 
-## Features
+## 🎯 Why Use This?
+
+When testing code that calls external HTTP APIs, you need to verify that:
+- Your code sends the **correct requests** (right path, method, headers, body)
+- Your code **handles responses correctly** (parsing, error handling, edge cases)
+
+**Traditional approaches have drawbacks:**
+
+| Approach | Problem |
+|----------|---------|
+| Mock the HTTP client | Doesn't test actual serialization, headers, or network code |
+| Use a shared test server | Flaky tests, shared state issues, hard to customize per test |
+| Record/replay (VCR) | Brittle when APIs change, hard to test error scenarios |
+
+**Server Harness gives you:**
+- ✅ **Real HTTP requests** - Your code makes actual network calls
+- ✅ **Isolated per test** - Each test gets its own server with its own responses
+- ✅ **Full control** - Define exactly what each endpoint returns
+- ✅ **Request inspection** - Assert on the exact requests your code made
+
+## 📦 Use Cases
+
+- **Testing REST API clients** - Verify your client library sends correct requests
+- **Integration testing** - Test your app's behavior with specific API responses
+- **Error scenario testing** - Simulate 500 errors, timeouts, malformed JSON
+- **Contract testing** - Ensure your code handles the expected API format
+- **Webhook testing** - Verify your code sends webhooks correctly
+
+## ✨ Features
 
 - 🏗️ **Builder Pattern** - Fluent API with `ScenarioBuilder` for defining test scenarios
 - 🔄 **Auto-shutdown** - Server automatically shuts down when all handlers have been called
-- ⚡ **Static & Dynamic Handlers** - Support for predefined responses and dynamic responses based on request context
-- 📝 **Request Collection** - Collect all incoming requests for assertions
-- 🌐 **Axum Backend** - Built on top of the Axum web framework
-- 🧱 **Clean Architecture** - Proper separation of entities, use cases, and adapters
+- ⚡ **Static & Dynamic Handlers** - Predefined responses or compute responses based on the request
+- 📝 **Request Collection** - Capture all incoming requests for assertions
+- 🔁 **Sequential Handlers** - Return different responses for successive calls
+- 🌐 **Axum Backend** - Built on the battle-tested Axum web framework
 
 ## Installation
 
@@ -107,6 +135,34 @@ let handler = Handler::new(
         .unwrap()
 );
 ```
+
+## 🔧 How It Works
+
+```
+┌─────────────────┐                    ┌──────────────────┐
+│   Your Code     │   GET /api/users   │   Mock Server    │
+│  (HTTP Client)  │───────────────────▶│   (Axum-based)   │
+│                 │                    │                  │
+│                 │◀───────────────────│  Returns JSON    │
+│                 │   200 OK + JSON    │  you configured  │
+└─────────────────┘                    └──────────────────┘
+                                              │
+                                              ▼
+                                       Auto-shutdown when
+                                       all handlers consumed
+                                              │
+                                              ▼
+                                       ┌──────────────────┐
+                                       │ Collected Requests│
+                                       │ for assertions   │
+                                       └──────────────────┘
+```
+
+1. **Define endpoints** - Specify path, method, and response for each endpoint
+2. **Execute scenario** - Server starts and waits for requests
+3. **Your code runs** - Makes real HTTP calls to the mock server
+4. **Auto-shutdown** - Server stops when all expected handlers have responded
+5. **Assert** - Verify collected requests match expectations
 
 ## License
 
